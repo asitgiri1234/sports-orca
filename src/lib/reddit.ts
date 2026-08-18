@@ -1,6 +1,7 @@
 import type {
   ApiError,
   ApiErrorCode,
+  AuthMode,
   RedditPost,
   SubredditPosts,
 } from "./types";
@@ -17,8 +18,15 @@ export const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
   SUBREDDIT_PRIVATE: 403,
   SUBREDDIT_QUARANTINED: 403,
   RATE_LIMITED: 429,
+  AUTH_ERROR: 502,
   UPSTREAM_ERROR: 502,
+  NETWORK_ERROR: 504,
 };
+
+export const TOKEN_URL = "https://www.reddit.com/api/v1/access_token";
+
+/** Refresh a token once it is within this window of expiring. */
+export const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
 export type InterpretResult =
   | { ok: true; data: SubredditPosts }
@@ -188,4 +196,292 @@ export function interpretRedditResponse({
     .filter((post) => post.id !== "");
 
   return { ok: true, data: { subreddit: name, count: posts.length, posts } };
+}
+
+
+// ---------------------------------------------------------------------------
+// OAuth: app-only (client_credentials) tokens
+// ---------------------------------------------------------------------------
+
+export function oauthSubredditUrl(name: string): string {
+  // The oauth host serves the same payload shape without the .json suffix.
+  return `https://oauth.reddit.com/r/${name}/hot?limit=${POST_LIMIT}`;
+}
+
+export function hasOAuthCredentials(): boolean {
+  return (
+    (process.env.REDDIT_CLIENT_ID?.trim().length ?? 0) > 0 &&
+    (process.env.REDDIT_CLIENT_SECRET?.trim().length ?? 0) > 0
+  );
+}
+
+export type TokenResult =
+  | { ok: true; token: string; expiresIn: number }
+  | {
+      ok: false;
+      reason: "no-credentials" | "network" | "status" | "malformed";
+      message: string;
+      status?: number;
+    };
+
+interface CachedToken {
+  token: string;
+  /** Epoch ms at which Reddit says this token stops working. */
+  expiresAt: number;
+}
+
+/**
+ * Module-scope cache. One token is reused across requests for its full
+ * lifetime; `inFlight` collapses concurrent misses into a single token call so
+ * a burst of requests does not trigger a burst of token fetches.
+ */
+let cachedToken: CachedToken | null = null;
+let inFlight: Promise<TokenResult> | null = null;
+
+/** Exposed for tests and the check script. */
+export function resetTokenCache(): void {
+  cachedToken = null;
+  inFlight = null;
+}
+
+export function getCachedTokenExpiry(): number | null {
+  return cachedToken?.expiresAt ?? null;
+}
+
+function tokenIsFresh(entry: CachedToken | null): entry is CachedToken {
+  return entry !== null && Date.now() < entry.expiresAt - TOKEN_REFRESH_MARGIN_MS;
+}
+
+/**
+ * Ask Reddit for an app-only token. Always hits the network - callers wanting
+ * the cache should use getAccessToken.
+ */
+export async function requestAccessToken(): Promise<TokenResult> {
+  const id = process.env.REDDIT_CLIENT_ID?.trim();
+  const secret = process.env.REDDIT_CLIENT_SECRET?.trim();
+
+  if (!id || !secret) {
+    return {
+      ok: false,
+      reason: "no-credentials",
+      message: "REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET are not both set.",
+    };
+  }
+
+  const basic = Buffer.from(`${id}:${secret}`).toString("base64");
+
+  let response: Response;
+  try {
+    response = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${basic}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": buildUserAgent(),
+      },
+      body: new URLSearchParams({ grant_type: "client_credentials" }).toString(),
+      // The token is cached in module scope, so never cache the request itself.
+      cache: "no-store",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "network",
+      message: `Token request never completed: ${(error as Error).message}`,
+    };
+  }
+
+  const bodyText = await response.text().catch(() => "");
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      reason: "status",
+      status: response.status,
+      message: `Token endpoint returned ${response.status}: ${bodyText.slice(0, 200)}`,
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    return {
+      ok: false,
+      reason: "malformed",
+      status: response.status,
+      message: "Token endpoint returned a non-JSON body.",
+    };
+  }
+
+  const payload = parsed as Record<string, unknown>;
+  const token = typeof payload.access_token === "string" ? payload.access_token : null;
+  const expiresIn =
+    typeof payload.expires_in === "number" && Number.isFinite(payload.expires_in)
+      ? payload.expires_in
+      : 3600;
+
+  if (!token) {
+    return {
+      ok: false,
+      reason: "malformed",
+      status: response.status,
+      message: "Token endpoint response had no access_token.",
+    };
+  }
+
+  return { ok: true, token, expiresIn };
+}
+
+/** Cached token accessor. Refreshes only when missing, stale, or forced. */
+export async function getAccessToken(forceRefresh = false): Promise<TokenResult> {
+  if (forceRefresh) cachedToken = null;
+
+  if (tokenIsFresh(cachedToken)) {
+    return { ok: true, token: cachedToken.token, expiresIn: 0 };
+  }
+
+  if (inFlight) return inFlight;
+
+  inFlight = (async () => {
+    const result = await requestAccessToken();
+    if (result.ok) {
+      cachedToken = {
+        token: result.token,
+        expiresAt: Date.now() + result.expiresIn * 1000,
+      };
+    }
+    return result;
+  })();
+
+  try {
+    return await inFlight;
+  } finally {
+    inFlight = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fetching a listing
+// ---------------------------------------------------------------------------
+
+export type SubredditFetch =
+  | { kind: "responded"; mode: AuthMode; status: number; payload: unknown }
+  | { kind: "network-error"; mode: AuthMode; message: string }
+  | { kind: "auth-error"; mode: AuthMode; message: string };
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Reddit serves HTML block/challenge pages; interpretRedditResponse reads
+    // a null payload as "not JSON".
+    return null;
+  }
+}
+
+type RawFetch =
+  | { ok: true; status: number; text: string }
+  | { ok: false; message: string };
+
+async function rawFetch(
+  url: string,
+  headers: Record<string, string>,
+): Promise<RawFetch> {
+  try {
+    const response = await fetch(url, {
+      headers,
+      // A missing sub is often a 302 to the search page; staying manual keeps
+      // that visible instead of silently following it to a 200.
+      redirect: "manual",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      next: { revalidate: REVALIDATE_SECONDS },
+    });
+    return {
+      ok: true,
+      status: response.status,
+      text: await response.text().catch(() => ""),
+    };
+  } catch (error) {
+    return { ok: false, message: (error as Error).message };
+  }
+}
+
+async function fetchAnonymous(name: string): Promise<SubredditFetch> {
+  const result = await rawFetch(subredditUrl(name), {
+    // Reddit hard-blocks generic/absent User-Agents, so this is load-bearing.
+    "User-Agent": buildUserAgent(),
+    Accept: "application/json",
+  });
+
+  if (!result.ok) {
+    return { kind: "network-error", mode: "anonymous", message: result.message };
+  }
+
+  return {
+    kind: "responded",
+    mode: "anonymous",
+    status: result.status,
+    payload: parseJson(result.text),
+  };
+}
+
+async function fetchWithOAuth(name: string): Promise<SubredditFetch> {
+  const url = oauthSubredditUrl(name);
+
+  const attempt = (token: string) =>
+    rawFetch(url, {
+      Authorization: `bearer ${token}`,
+      "User-Agent": buildUserAgent(),
+      Accept: "application/json",
+    });
+
+  let tokenResult = await getAccessToken();
+  if (!tokenResult.ok) {
+    return { kind: "auth-error", mode: "oauth", message: tokenResult.message };
+  }
+
+  let result = await attempt(tokenResult.token);
+  if (!result.ok) {
+    return { kind: "network-error", mode: "oauth", message: result.message };
+  }
+
+  // A 401 means the cached token is dead (revoked, or expired early). Drop it
+  // and retry exactly once with a fresh one.
+  if (result.status === 401) {
+    tokenResult = await getAccessToken(true);
+    if (!tokenResult.ok) {
+      return { kind: "auth-error", mode: "oauth", message: tokenResult.message };
+    }
+
+    result = await attempt(tokenResult.token);
+    if (!result.ok) {
+      return { kind: "network-error", mode: "oauth", message: result.message };
+    }
+
+    if (result.status === 401) {
+      return {
+        kind: "auth-error",
+        mode: "oauth",
+        message: "Reddit rejected a freshly issued token (401 after retry).",
+      };
+    }
+  }
+
+  return {
+    kind: "responded",
+    mode: "oauth",
+    status: result.status,
+    payload: parseJson(result.text),
+  };
+}
+
+/**
+ * Fetch a subreddit listing, preferring OAuth and falling back to the
+ * unauthenticated host when no credentials are configured, so the project
+ * still runs for anyone without an app registered.
+ */
+export async function fetchSubreddit(name: string): Promise<SubredditFetch> {
+  return hasOAuthCredentials() ? fetchWithOAuth(name) : fetchAnonymous(name);
 }

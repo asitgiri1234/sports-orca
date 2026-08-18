@@ -1,6 +1,7 @@
 import { SentimentIntensityAnalyzer } from "vader-sentiment";
 
 import type {
+  AuthMode,
   ScoredPost,
   SubredditPosts,
   SubredditPostsResponse,
@@ -159,7 +160,10 @@ export function aggregateSentiment(posts: ScoredPost[]): SentimentAggregate {
  * plus the aggregate block. Shared by the route and the check script so the
  * two cannot drift.
  */
-export function attachSentiment(data: SubredditPosts): SubredditPostsResponse {
+export function attachSentiment(
+  data: SubredditPosts,
+  source: AuthMode,
+): SubredditPostsResponse {
   const posts: ScoredPost[] = data.posts.map((post) => ({
     ...post,
     sentiment: scoreTitle(post.title),
@@ -168,6 +172,7 @@ export function attachSentiment(data: SubredditPosts): SubredditPostsResponse {
   return {
     subreddit: data.subreddit,
     count: posts.length,
+    source,
     posts,
     sentiment: aggregateSentiment(posts),
   };

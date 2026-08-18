@@ -9,7 +9,8 @@
     "lint": "eslint",
     "check:fetch": "tsx scripts/check-fetch.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "diagnose": "tsx scripts/diagnose-reddit.ts"
   },
   "dependencies": {
     "next": "16.3.1",

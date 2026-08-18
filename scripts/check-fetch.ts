@@ -4,19 +4,65 @@
  *   npm run dev            # in one terminal
  *   npm run check:fetch    # in another
  *
- * Part 1 hits the live route. Part 2 replays recorded Reddit payload shapes
- * through the pure mapper, so the error matrix stays verifiable even when the
- * network blocks Reddit (it 403s unauthenticated JSON from many IPs).
+ * Part 1 checks credentials and the OAuth token endpoint on its own, so a
+ * token failure is distinguishable from a listing failure.
+ * Part 2 hits the live route and reports which auth mode served each call.
+ * Part 3 replays recorded Reddit payload shapes through the pure mapper, so
+ * the error matrix stays verifiable even when the network blocks Reddit.
+ * Part 4 composes the full API body offline.
  *
  * Override the target with BASE_URL=https://... if the app runs elsewhere.
  */
-import { interpretRedditResponse } from "../src/lib/reddit";
+import { readFileSync } from "node:fs";
+
+import {
+  TOKEN_URL,
+  getAccessToken,
+  hasOAuthCredentials,
+  interpretRedditResponse,
+  oauthSubredditUrl,
+  requestAccessToken,
+  resetTokenCache,
+  subredditUrl,
+} from "../src/lib/reddit";
 import { attachSentiment } from "../src/lib/sentiment";
 import {
   isApiError,
   type ApiErrorCode,
   type SubredditApiResult,
 } from "../src/lib/types";
+
+/**
+ * This script runs outside Next.js, which loads .env.local for us. Parse it
+ * here so the token check sees the same credentials the server would.
+ */
+function loadEnvLocal() {
+  let contents: string;
+  try {
+    contents = readFileSync(".env.local", "utf8");
+  } catch {
+    return;
+  }
+
+  for (const rawLine of contents.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#")) continue;
+
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+
+    const key = line.slice(0, eq).trim();
+    const value = line
+      .slice(eq + 1)
+      .trim()
+      .replace(/^["'](.*)["']$/, "$1");
+
+    // Real environment variables win over the file.
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+loadEnvLocal();
 
 const BASE_URL = process.env.BASE_URL ?? "http://localhost:3000";
 
@@ -29,6 +75,60 @@ const LIVE_CASES: Array<{ name: string; expectation: string }> = [
 
 function line(char = "-") {
   console.log(char.repeat(70));
+}
+
+function mask(token: string): string {
+  if (token.length <= 8) return "*".repeat(token.length);
+  return `${token.slice(0, 4)}...${token.slice(-4)} (${token.length} chars)`;
+}
+
+/** Part 1: is the token endpoint itself healthy, separate from any listing? */
+async function checkToken() {
+  const configured = hasOAuthCredentials();
+  console.log(`REDDIT_CLIENT_ID / SECRET: ${configured ? "both set" : "not both set"}`);
+  console.log(`REDDIT_USER_AGENT: ${process.env.REDDIT_USER_AGENT ?? "(unset, using fallback)"}`);
+  console.log(`token endpoint: ${TOKEN_URL}`);
+
+  if (!configured) {
+    console.log("");
+    console.log("  SKIP - no credentials, so the route will use the anonymous path.");
+    console.log("  Set REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET in .env.local to");
+    console.log("  exercise OAuth. See .env.local.example.");
+    return;
+  }
+
+  resetTokenCache();
+
+  const started = Date.now();
+  const result = await requestAccessToken();
+  const elapsed = Date.now() - started;
+
+  if (result.ok) {
+    console.log("");
+    console.log(`  OK - token acquired in ${elapsed}ms`);
+    console.log(`  access_token: ${mask(result.token)}`);
+    console.log(`  expires_in:   ${result.expiresIn}s`);
+
+    // Prove the module-scope cache is doing its job.
+    const first = await getAccessToken();
+    const second = await getAccessToken();
+    console.log(
+      `  cache check:  two getAccessToken() calls returned ${
+        first.ok && second.ok && first.token === second.token
+          ? "the same token (cached)"
+          : "DIFFERENT tokens (cache not working)"
+      }`,
+    );
+    return;
+  }
+
+  console.log("");
+  console.log(`  FAILED after ${elapsed}ms`);
+  console.log(`  reason: ${result.reason}`);
+  if (result.status !== undefined) console.log(`  status: ${result.status}`);
+  console.log(`  message: ${result.message}`);
+  console.log("");
+  console.log("  A failure here is a TOKEN problem, not a listing problem.");
 }
 
 async function checkLive(name: string, expectation: string) {
@@ -58,20 +158,19 @@ async function checkLive(name: string, expectation: string) {
   }
 
   if (isApiError(body)) {
+    console.log(`  source: n/a (request failed before a mode was reported)`);
     console.log(`  code: ${body.code}`);
     console.log(`  message: ${body.message}`);
     return;
   }
 
+  console.log(`  source: ${body.source}`);
   console.log(`  count: ${body.count}`);
+  console.log(
+    `  mean compound: ${body.sentiment.meanCompound} | +${body.sentiment.breakdown.positive.count} / -${body.sentiment.breakdown.negative.count} / =${body.sentiment.breakdown.neutral.count}`,
+  );
   for (const post of body.posts.slice(0, 3)) {
-    console.log(`    [${post.score}pts ${post.numComments}c] ${post.title.slice(0, 55)}`);
-    console.log(
-      `        by u/${post.author} | flair: ${post.flair ?? "none"} | ${new Date(
-        post.createdUtc * 1000,
-      ).toISOString()}`,
-    );
-    console.log(`        ${post.permalink}`);
+    console.log(`    [${post.sentiment.label} ${post.sentiment.compound}] ${post.title.slice(0, 50)}`);
   }
   if (body.count > 3) console.log(`    ... and ${body.count - 3} more`);
 }
@@ -234,10 +333,8 @@ function showApiBody() {
     return;
   }
 
-  const body = attachSentiment(result.data);
-  console.log("First post with sentiment attached:");
-  console.log(JSON.stringify(body.posts[0], null, 2));
-  console.log("");
+  const body = attachSentiment(result.data, hasOAuthCredentials() ? "oauth" : "anonymous");
+  console.log(`source: ${body.source}`);
   console.log("Aggregate block:");
   console.log(
     JSON.stringify(
@@ -253,20 +350,34 @@ function showApiBody() {
 }
 
 async function main() {
-  console.log(`PART 1 - live route at ${BASE_URL}`);
+  line("=");
+  console.log("PART 1 - credentials and OAuth token endpoint");
+  line("=");
+  await checkToken();
+
+  console.log("");
+  line("=");
+  console.log(`PART 2 - live route at ${BASE_URL}`);
   console.log(
-    `REDDIT_USER_AGENT is ${process.env.REDDIT_USER_AGENT ? "set" : "unset (server uses its fallback)"}`,
+    `expected listing host: ${
+      hasOAuthCredentials() ? oauthSubredditUrl("<name>") : subredditUrl("<name>")
+    }`,
   );
+  line("=");
   for (const testCase of LIVE_CASES) {
     await checkLive(testCase.name, testCase.expectation);
   }
 
+  console.log("");
   line("=");
-  console.log("PART 2 - recorded Reddit payload shapes through the mapper");
+  console.log("PART 3 - recorded Reddit payload shapes through the mapper");
+  line("=");
   const ok = runFixtures();
 
+  console.log("");
   line("=");
-  console.log("PART 3 - full API body (mapper + sentiment, composed offline)");
+  console.log("PART 4 - full API body (mapper + sentiment, composed offline)");
+  line("=");
   showApiBody();
 
   line("=");

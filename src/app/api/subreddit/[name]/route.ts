@@ -1,13 +1,10 @@
 import { NextResponse } from "next/server";
 
 import {
-  FETCH_TIMEOUT_MS,
   NAME_PATTERN,
-  REVALIDATE_SECONDS,
   STATUS_BY_CODE,
-  buildUserAgent,
+  fetchSubreddit,
   interpretRedditResponse,
-  subredditUrl,
 } from "@/lib/reddit";
 import { attachSentiment } from "@/lib/sentiment";
 import type { ApiError } from "@/lib/types";
@@ -33,38 +30,28 @@ export async function GET(
     });
   }
 
-  let response: Response;
-  try {
-    response = await fetch(subredditUrl(name), {
-      headers: {
-        // Reddit hard-blocks generic/absent User-Agents, so this is load-bearing.
-        "User-Agent": buildUserAgent(),
-        Accept: "application/json",
-      },
-      // A nonexistent sub is often a 302 to the subreddit-search page. Staying
-      // manual keeps that visible instead of silently following it to a 200.
-      redirect: "manual",
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      next: { revalidate: REVALIDATE_SECONDS },
+  const outcome = await fetchSubreddit(name);
+
+  // The request never completed - DNS, TLS, connection reset, or timeout.
+  if (outcome.kind === "network-error") {
+    return fail({
+      code: "NETWORK_ERROR",
+      message: `Could not reach Reddit: ${outcome.message}`,
     });
-  } catch {
-    return fail({ code: "UPSTREAM_ERROR", message: "Could not reach Reddit." });
   }
 
-  // Parse defensively: Reddit serves HTML challenge/error pages on some
-  // failures, and interpretRedditResponse treats a null payload as "not JSON".
-  const payload = await response
-    .json()
-    .then((value: unknown) => value)
-    .catch(() => null);
+  // We could not obtain or use an OAuth token.
+  if (outcome.kind === "auth-error") {
+    return fail({ code: "AUTH_ERROR", message: outcome.message });
+  }
 
   const result = interpretRedditResponse({
     name,
-    status: response.status,
-    payload,
+    status: outcome.status,
+    payload: outcome.payload,
   });
 
   if (!result.ok) return fail(result.error);
 
-  return NextResponse.json(attachSentiment(result.data));
+  return NextResponse.json(attachSentiment(result.data, outcome.mode));
 }

@@ -60,6 +60,8 @@ export interface SubredditPosts {
 export interface SubredditPostsResponse {
   subreddit: string;
   count: number;
+  /** Which credential path produced this response. */
+  source: AuthMode;
   posts: ScoredPost[];
   sentiment: SentimentAggregate;
 }
@@ -71,7 +73,13 @@ export interface SubredditPostsResponse {
  *   SUBREDDIT_PRIVATE      403  exists but requires approval to view
  *   SUBREDDIT_QUARANTINED  403  exists but is gated behind a quarantine opt-in
  *   RATE_LIMITED           429  Reddit throttled us
- *   UPSTREAM_ERROR         502  Reddit erred, timed out, or answered with garbage
+ *   AUTH_ERROR             502  could not obtain or use an OAuth token
+ *   UPSTREAM_ERROR         502  Reddit answered, but with something unusable
+ *   NETWORK_ERROR          504  the request never completed (DNS/TLS/timeout)
+ *
+ * UPSTREAM_ERROR and NETWORK_ERROR are deliberately separate: the first means
+ * Reddit replied and we could not use the reply, the second means we never got
+ * a reply at all. They call for different debugging.
  */
 export type ApiErrorCode =
   | "INVALID_NAME"
@@ -79,7 +87,12 @@ export type ApiErrorCode =
   | "SUBREDDIT_PRIVATE"
   | "SUBREDDIT_QUARANTINED"
   | "RATE_LIMITED"
-  | "UPSTREAM_ERROR";
+  | "AUTH_ERROR"
+  | "UPSTREAM_ERROR"
+  | "NETWORK_ERROR";
+
+/** Which credential path served a response. */
+export type AuthMode = "oauth" | "anonymous";
 
 export interface ApiError {
   code: ApiErrorCode;
