@@ -2,7 +2,7 @@ import type {
   ApiError,
   ApiErrorCode,
   RedditPost,
-  SubredditPostsResponse,
+  SubredditPosts,
 } from "./types";
 
 export const NAME_PATTERN = /^[A-Za-z0-9_]{2,21}$/;
@@ -21,7 +21,7 @@ export const STATUS_BY_CODE: Record<ApiErrorCode, number> = {
 };
 
 export type InterpretResult =
-  | { ok: true; data: SubredditPostsResponse }
+  | { ok: true; data: SubredditPosts }
   | { ok: false; error: ApiError };
 
 export interface RedditResponseInput {

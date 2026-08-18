@@ -9,6 +9,7 @@ import {
   interpretRedditResponse,
   subredditUrl,
 } from "@/lib/reddit";
+import { attachSentiment } from "@/lib/sentiment";
 import type { ApiError } from "@/lib/types";
 
 /** Cache a given subreddit's hot listing for 5 minutes. */
@@ -63,5 +64,7 @@ export async function GET(
     payload,
   });
 
-  return result.ok ? NextResponse.json(result.data) : fail(result.error);
+  if (!result.ok) return fail(result.error);
+
+  return NextResponse.json(attachSentiment(result.data));
 }

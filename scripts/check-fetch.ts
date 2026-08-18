@@ -11,6 +11,7 @@
  * Override the target with BASE_URL=https://... if the app runs elsewhere.
  */
 import { interpretRedditResponse } from "../src/lib/reddit";
+import { attachSentiment } from "../src/lib/sentiment";
 import {
   isApiError,
   type ApiErrorCode,
@@ -207,15 +208,48 @@ function runFixtures(): boolean {
   return failures === 0;
 }
 
-function showMappedPost() {
+/** Compose the full API body offline, exactly as the route does. */
+function showApiBody() {
   const result = interpretRedditResponse({
     name: "programming",
     status: 200,
-    payload: { kind: "Listing", data: { children: [postChild("abc123")] } },
+    payload: {
+      kind: "Listing",
+      data: {
+        children: [
+          postChild("abc123", {
+            title: "This library is absolutely fantastic and I love the docs",
+          }),
+          postChild("def456", {
+            title: "Terrible release, this update is a buggy disaster and I hate it",
+          }),
+          postChild("ghi789", { title: "Rust 1.75 released" }),
+          postChild("jkl012", { title: "not good at all" }),
+        ],
+      },
+    },
   });
-  if (result.ok) {
-    console.log(JSON.stringify(result.data.posts[0], null, 2));
+  if (!result.ok) {
+    console.log(`  unexpected error: ${result.error.code}`);
+    return;
   }
+
+  const body = attachSentiment(result.data);
+  console.log("First post with sentiment attached:");
+  console.log(JSON.stringify(body.posts[0], null, 2));
+  console.log("");
+  console.log("Aggregate block:");
+  console.log(
+    JSON.stringify(
+      {
+        ...body.sentiment,
+        mostPositive: body.sentiment.mostPositive?.title ?? null,
+        mostNegative: body.sentiment.mostNegative?.title ?? null,
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 async function main() {
@@ -232,8 +266,8 @@ async function main() {
   const ok = runFixtures();
 
   line("=");
-  console.log("Mapped post shape:");
-  showMappedPost();
+  console.log("PART 3 - full API body (mapper + sentiment, composed offline)");
+  showApiBody();
 
   line("=");
   console.log(ok ? "All fixtures passed." : "Some fixtures FAILED.");

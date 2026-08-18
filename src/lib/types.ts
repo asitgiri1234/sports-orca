@@ -13,10 +13,55 @@ export interface RedditPost {
   flair: string | null;
 }
 
-export interface SubredditPostsResponse {
+/** Post sentiment classes, using VADER's standard compound thresholds. */
+export type SentimentLabel = "positive" | "negative" | "neutral";
+
+/**
+ * How much one token moved the compound score, measured by re-scoring the
+ * title without it. Signed: negative means the token pushed the score down.
+ */
+export interface TokenContribution {
+  token: string;
+  contribution: number;
+}
+
+export interface SentimentResult {
+  /** Normalized compound score in [-1, 1]. */
+  compound: number;
+  label: SentimentLabel;
+  /** The three most influential tokens, strongest first. */
+  topTokens: TokenContribution[];
+}
+
+export type ScoredPost = RedditPost & { sentiment: SentimentResult };
+
+export interface LabelBreakdown {
+  count: number;
+  /** Share of all scored posts, 0-100, rounded to one decimal. */
+  percentage: number;
+}
+
+export interface SentimentAggregate {
+  count: number;
+  meanCompound: number;
+  breakdown: Record<SentimentLabel, LabelBreakdown>;
+  mostPositive: ScoredPost | null;
+  mostNegative: ScoredPost | null;
+}
+
+/** Posts as parsed from Reddit, before sentiment is attached. */
+export interface SubredditPosts {
   subreddit: string;
   count: number;
   posts: RedditPost[];
+}
+
+/** What the API route returns on success. */
+export interface SubredditPostsResponse {
+  subreddit: string;
+  count: number;
+  posts: ScoredPost[];
+  sentiment: SentimentAggregate;
 }
 
 /**
