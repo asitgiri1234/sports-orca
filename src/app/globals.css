@@ -34,6 +34,17 @@
   --color-negative-wash: #fef2f2;
   --color-flat: #57534e;
   --color-flat-wash: #f5f5f4;
+
+  /*
+   * Chart fills are separate from the text colours above. Text on a dark
+   * surface wants a light hue; a chart fill wants a mid-lightness one. These
+   * steps are validated as a diverging scale (green <- gray -> red) for
+   * lightness band, normal-vision separation, and contrast vs the surface.
+   */
+  --color-chart-positive: #15803d;
+  --color-chart-neutral: #57534e;
+  --color-chart-negative: #b91c1c;
+  --color-chart-grid: #e7e5e4;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -57,6 +68,11 @@
     --color-negative-wash: #2a1414;
     --color-flat: #b8b2ab;
     --color-flat-wash: #221f1d;
+
+    --color-chart-positive: #19ac52;
+    --color-chart-neutral: #8a8681;
+    --color-chart-negative: #e5484d;
+    --color-chart-grid: #2c2825;
   }
 }
 

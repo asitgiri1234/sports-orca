@@ -2,6 +2,8 @@
 
 import { useCallback, useRef, useState } from "react";
 
+import { DistributionCharts } from "@/components/DistributionCharts";
+import { MethodologyNote } from "@/components/MethodologyNote";
 import { PostList, type SortMode } from "@/components/PostList";
 import { SearchBar } from "@/components/SearchBar";
 import { SummaryCard } from "@/components/SummaryCard";
@@ -117,7 +119,12 @@ export function Dashboard() {
                 subreddit={status.data.subreddit}
                 aggregate={status.data.sentiment}
               />
+              <MethodologyNote />
             </div>
+            <DistributionCharts
+              posts={status.data.posts}
+              aggregate={status.data.sentiment}
+            />
             <PostList
               posts={status.data.posts}
               sort={sort}

@@ -141,11 +141,48 @@ function PostRow({ post }: { post: ScoredPost }) {
             )}
           </div>
 
-          {topTokens.length > 0 && (
-            <p className="mt-1.5 font-mono text-[0.6875rem] text-ink-faint">
-              {topTokens
-                .map((token) => `${token.token} ${formatCompound(token.contribution)}`)
-                .join("   ")}
+          {topTokens.length > 0 ? (
+            <details className="group mt-2">
+              <summary className="inline-flex cursor-pointer list-none items-center gap-1 text-xs text-ink-faint transition-colors hover:text-accent [&::-webkit-details-marker]:hidden">
+                <span
+                  aria-hidden="true"
+                  className="transition-transform group-open:rotate-90"
+                >
+                  &rsaquo;
+                </span>
+                Why this score?
+              </summary>
+
+              <div className="mt-2 rounded-lg border border-line bg-canvas p-3">
+                <ul className="space-y-1.5">
+                  {topTokens.map((token) => (
+                    <li
+                      key={token.token}
+                      className="flex items-baseline justify-between gap-3 text-xs"
+                    >
+                      <span className="min-w-0 truncate font-mono text-ink">
+                        {token.token}
+                      </span>
+                      <span
+                        className={`shrink-0 font-mono tabular-nums ${
+                          token.contribution > 0 ? "text-positive" : "text-negative"
+                        }`}
+                      >
+                        {formatCompound(token.contribution)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-2.5 border-t border-line pt-2 text-[0.6875rem] leading-relaxed text-ink-faint">
+                  Each number is how far the compound score moves when that word
+                  is removed from the title, so negators and intensifiers are
+                  credited in context rather than by dictionary value.
+                </p>
+              </div>
+            </details>
+          ) : (
+            <p className="mt-2 text-xs text-ink-faint">
+              No words from the sentiment lexicon appear in this title.
             </p>
           )}
         </div>
